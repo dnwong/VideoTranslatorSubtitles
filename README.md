@@ -73,9 +73,10 @@ dist\VideoTranslatorSubtitles\VideoTranslatorSubtitles.exe
 1. Click **Browse** and choose an `.mp4` video.
 2. Select a Whisper model.
 3. Optional: check **Burn subtitles visibly into a new video ending with "_eng.mp4"**.
-4. Click **Create Subtitle File**.
+4. Optional: check **Re-encode output video to 720p**.
+5. Click **Create Subtitle File**.
 
-If burning is not enabled, the app creates an `.srt` subtitle file with the English translation and the same base name as the original video. If burning is enabled, it creates a new MP4 ending with `_eng.mp4` where the subtitles are visible on the video, then deletes the separate `.srt` file.
+If burning is not enabled, the app creates an `.srt` subtitle file with the English translation and the same base name as the original video. If burning is enabled, it creates a new MP4 ending with `_eng.mp4` where the subtitles are visible on the video, then deletes the separate `.srt` file. If 720p re-encoding is enabled, the burned output video is scaled to 720p.
 
 ## Notes
 

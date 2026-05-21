@@ -34,6 +34,7 @@ class VideoTranslatorApp:
         self.input_path = tk.StringVar()
         self.model_size = tk.StringVar(value="base")
         self.embed_subtitles = tk.BooleanVar(value=False)
+        self.reencode_720p = tk.BooleanVar(value=False)
         self.status_text = tk.StringVar(value="Choose an MP4 file to begin.")
         self.progress_value = tk.DoubleVar(value=0)
         self.message_queue: queue.Queue[tuple[str, object]] = queue.Queue()
@@ -83,6 +84,14 @@ class VideoTranslatorApp:
             variable=self.embed_subtitles,
         ).pack(anchor=tk.W)
 
+        reencode_row = ttk.Frame(frame)
+        reencode_row.pack(fill=tk.X, pady=6)
+        ttk.Checkbutton(
+            reencode_row,
+            text="Re-encode output video to 720p",
+            variable=self.reencode_720p,
+        ).pack(anchor=tk.W)
+
         actions = ttk.Frame(frame)
         actions.pack(fill=tk.X, pady=(18, 8))
         self.convert_button = ttk.Button(actions, text="Create Subtitle File", command=self._start_conversion)
@@ -117,12 +126,12 @@ class VideoTranslatorApp:
         self.status_text.set("Starting conversion...")
         self.worker_thread = threading.Thread(
             target=self._convert_video,
-            args=(input_file, self.model_size.get(), self.embed_subtitles.get()),
+            args=(input_file, self.model_size.get(), self.embed_subtitles.get(), self.reencode_720p.get()),
             daemon=True,
         )
         self.worker_thread.start()
 
-    def _convert_video(self, input_file: Path, model_size: str, embed_subtitles: bool) -> None:
+    def _convert_video(self, input_file: Path, model_size: str, embed_subtitles: bool, reencode_720p: bool) -> None:
         try:
             with tempfile.TemporaryDirectory() as temp_dir_name:
                 temp_dir = Path(temp_dir_name)
@@ -177,10 +186,11 @@ class VideoTranslatorApp:
                 embedded_video = None
                 if embed_subtitles:
                     embedded_video = input_file.with_name(f"{input_file.stem}_eng{input_file.suffix}")
-                    self._post_status("Burning subtitles into new MP4. This may take a while...", 85)
+                    output_description = " at 720p" if reencode_720p else ""
+                    self._post_status(f"Burning subtitles into new MP4{output_description}. This may take a while...", 85)
                     temp_embed_srt = temp_dir / "english.srt"
                     temp_embed_srt.write_text(srt_content, encoding="utf-8")
-                    self._embed_subtitles(input_file, temp_embed_srt, embedded_video)
+                    self._embed_subtitles(input_file, temp_embed_srt, embedded_video, reencode_720p)
                     srt_file.unlink(missing_ok=True)
 
             if embed_subtitles and embedded_video:
@@ -208,15 +218,18 @@ class VideoTranslatorApp:
         secs, millis = divmod(remainder, 1000)
         return f"{hours:02}:{minutes:02}:{secs:02},{millis:03}"
 
-    def _embed_subtitles(self, input_file: Path, srt_file: Path, output_file: Path) -> None:
+    def _embed_subtitles(self, input_file: Path, srt_file: Path, output_file: Path, reencode_720p: bool) -> None:
         subtitle_filter = f"subtitles={self._format_ffmpeg_filter_path(srt_file)}"
+        video_filter = subtitle_filter
+        if reencode_720p:
+            video_filter = f"scale=-2:720,{subtitle_filter}"
         self._run_ffmpeg([
             self._get_ffmpeg_path(),
             "-y",
             "-i",
             str(input_file),
             "-vf",
-            subtitle_filter,
+            video_filter,
             "-c:v",
             "libx264",
             "-crf",
