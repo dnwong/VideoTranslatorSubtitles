@@ -11,9 +11,10 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 .\.venv\Scripts\python.exe -m py_compile app.py
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --windowed --name VideoTranslatorSubtitles --collect-all faster_whisper --collect-all ctranslate2 --collect-all tokenizers --collect-all imageio_ffmpeg app.py
+$distPath = Join-Path $PSScriptRoot ('dist_' + (Get-Date -Format 'yyyyMMdd_HHmmss'))
+.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --windowed --distpath $distPath --name VideoTranslatorSubtitles --collect-all faster_whisper --collect-all ctranslate2 --collect-all tokenizers --collect-all imageio_ffmpeg app.py
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host ''
 Write-Host 'Build complete:'
-Write-Host 'dist\VideoTranslatorSubtitles\VideoTranslatorSubtitles.exe'
+Write-Host (Join-Path $distPath 'VideoTranslatorSubtitles\VideoTranslatorSubtitles.exe')

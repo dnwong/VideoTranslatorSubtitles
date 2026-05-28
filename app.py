@@ -6,6 +6,7 @@ import tempfile
 import threading
 import tkinter as tk
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -32,7 +33,7 @@ class VideoTranslatorApp:
         self.root.minsize(680, 420)
 
         self.input_path = tk.StringVar()
-        self.model_size = tk.StringVar(value="base")
+        self.model_size = tk.StringVar(value="large-v3")
         self.embed_subtitles = tk.BooleanVar(value=False)
         self.reencode_720p = tk.BooleanVar(value=False)
         self.status_text = tk.StringVar(value="Choose an MP4 file to begin.")
@@ -110,6 +111,8 @@ class VideoTranslatorApp:
         if not selected:
             return
         self.input_path.set(selected)
+        self.progress_value.set(0)
+        self.status_text.set("Choose an MP4 file to begin.")
 
     def _start_conversion(self) -> None:
         input_file = Path(self.input_path.get())
@@ -197,7 +200,8 @@ class VideoTranslatorApp:
                 done_message = f"Saved subtitled video:\n{embedded_video}\n\nDeleted temporary subtitle file:\n{input_file.with_suffix('.srt')}"
             else:
                 done_message = f"Saved English subtitles:\n{input_file.with_suffix('.srt')}"
-            self.message_queue.put(("done", done_message))
+            output_file = embedded_video if embed_subtitles and embedded_video else input_file.with_suffix(".srt")
+            self.message_queue.put(("done", (done_message, input_file, output_file)))
         except Exception as exc:
             self.message_queue.put(("error", str(exc)))
 
@@ -290,10 +294,12 @@ class VideoTranslatorApp:
                     self.status_text.set(str(text))
                     self.progress_value.set(float(progress))
                 elif event == "done":
+                    message, original_file, output_file = payload
                     self.progress_value.set(100)
-                    self.status_text.set(str(payload))
+                    self.status_text.set(str(message))
                     self.convert_button.configure(state=tk.NORMAL)
-                    messagebox.showinfo("Conversion complete", str(payload))
+                    messagebox.showinfo("Conversion complete", str(message), parent=self.root)
+                    self.root.after(100, lambda original=Path(original_file), output=Path(output_file): self._ask_delete_original(original, output))
                 elif event == "error":
                     self.status_text.set(f"Error: {payload}")
                     self.convert_button.configure(state=tk.NORMAL)
@@ -301,6 +307,112 @@ class VideoTranslatorApp:
         except queue.Empty:
             pass
         self.root.after(100, self._process_queue)
+
+    def _ask_delete_original(self, original_file: Path, output_file: Path) -> None:
+        if not original_file.exists():
+            self.status_text.set(f"Original video no longer exists:\n{original_file}")
+            return
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+        self.root.attributes("-topmost", True)
+        self.root.after(250, lambda: self.root.attributes("-topmost", False))
+        file_details = self._format_file_details(original_file, output_file)
+        should_delete = self._ask_wide_yes_no(
+            "Delete original video?",
+            f"Do you want to delete the original video file?\n\n{file_details}",
+            confirm_message="Are you sure you want to delete the file?",
+        )
+        if not should_delete:
+            return
+        try:
+            original_file.unlink()
+            self.status_text.set(f"Deleted original video:\n{original_file}")
+            messagebox.showinfo("Original deleted", f"Deleted original video:\n\n{original_file}", parent=self.root)
+        except Exception as exc:
+            messagebox.showerror("Delete failed", f"Could not delete original video:\n\n{original_file}\n\n{exc}", parent=self.root)
+
+    def _format_file_details(self, original_file: Path, output_file: Path) -> str:
+        rows = [
+            ("Old file", original_file),
+            ("New file", output_file),
+        ]
+        filename_width = max(42, len(original_file.name), len(output_file.name))
+        lines = [
+            f"{'Type':<10} {'Filename':<{filename_width}} {'Date modified':<20} {'Size':>12}",
+            f"{'-' * 10} {'-' * filename_width} {'-' * 20} {'-' * 12}",
+        ]
+        for label, path in rows:
+            if path.exists():
+                stats = path.stat()
+                modified = datetime.fromtimestamp(stats.st_mtime).strftime("%Y-%m-%d %I:%M %p")
+                size = self._format_file_size(stats.st_size)
+            else:
+                modified = "Missing"
+                size = "Missing"
+            name = path.name
+            lines.append(f"{label:<10} {name:<{filename_width}} {modified:<20} {size:>12}")
+        return "\n".join(lines)
+
+    def _format_file_size(self, size: int) -> str:
+        units = ("B", "KB", "MB", "GB", "TB")
+        value = float(size)
+        for unit in units:
+            if value < 1024 or unit == units[-1]:
+                if unit == "B":
+                    return f"{int(value)} {unit}"
+                return f"{value:.1f} {unit}"
+            value /= 1024
+
+    def _ask_wide_yes_no(self, title: str, message: str, warning_text: str | None = None, confirm_message: str | None = None) -> bool:
+        result = tk.BooleanVar(value=False)
+        dialog = tk.Toplevel(self.root)
+        dialog.title(title)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        frame = ttk.Frame(dialog, padding=18)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        display_message = message
+        if warning_text and message.endswith(warning_text):
+            display_message = message[: -len(warning_text)].rstrip()
+
+        message_label = ttk.Label(frame, text=display_message, justify=tk.LEFT, font=("Lucida Console", 10))
+        message_label.pack(fill=tk.BOTH, expand=True)
+
+        if warning_text:
+            warning_label = tk.Label(frame, text=warning_text, justify=tk.LEFT, font=("Segoe UI", 16, "bold"), fg="red")
+            warning_label.pack(anchor=tk.W, pady=(10, 0))
+
+        button_row = ttk.Frame(frame)
+        button_row.pack(fill=tk.X, pady=(18, 0))
+
+        def choose(value: bool) -> None:
+            if value and confirm_message:
+                confirmed = messagebox.askyesno("Confirm deletion", confirm_message, parent=dialog)
+                if not confirmed:
+                    return
+            result.set(value)
+            dialog.destroy()
+
+        ttk.Button(button_row, text="Yes", command=lambda: choose(True), width=12).pack(side=tk.RIGHT, padx=(8, 0))
+        ttk.Button(button_row, text="No", command=lambda: choose(False), width=12).pack(side=tk.RIGHT)
+
+        dialog.protocol("WM_DELETE_WINDOW", lambda: choose(False))
+        dialog.update_idletasks()
+        widest_line = max((len(line) for line in message.splitlines()), default=80)
+        screen_width = dialog.winfo_screenwidth()
+        width = min(max(520, 70 + widest_line * 9), max(520, screen_width - 80))
+        message_label.configure(wraplength=max(width - 60, 460))
+        height = max(220, dialog.winfo_reqheight())
+        x = self.root.winfo_rootx() + max((self.root.winfo_width() - width) // 2, 0)
+        y = self.root.winfo_rooty() + max((self.root.winfo_height() - height) // 2, 0)
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+        dialog.focus_force()
+        self.root.wait_window(dialog)
+        return result.get()
 
 
 if __name__ == "__main__":
