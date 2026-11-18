@@ -1,3 +1,4 @@
+import json
 import os
 import queue
 import shutil
@@ -5,11 +6,18 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tkinter as tk
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+except Exception:  # drag and drop stays optional if the package is missing
+    DND_FILES = None
+    TkinterDnD = None
 
 os.environ.setdefault("HF_HOME", str(Path.home() / "AppData" / "Local" / "VideoTranslatorSubtitles" / "huggingface"))
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
@@ -20,6 +28,56 @@ from faster_whisper import WhisperModel
 MAX_BATCH_FILES = 10
 SUPPORTED_VIDEO_SUFFIXES = (".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".wmv")
 OUTPUT_HEIGHT_CHOICES = ("1080", "720", "480")
+MODEL_CHOICES = ("tiny", "base", "small", "medium", "large-v3")
+DEFAULT_SETTINGS = {
+    "model_size": "small",
+    "burn_subtitles": True,
+    "reencode_video": True,
+    "output_height": "720",
+    "skip_existing": True,
+}
+SETTINGS_DIRECTORY = (
+    Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+    / "VideoTranslatorSubtitles"
+)
+SETTINGS_FILE = SETTINGS_DIRECTORY / "settings.json"
+
+
+def load_settings() -> dict:
+    """Return the saved preferences, ignoring anything unrecognised."""
+    settings = dict(DEFAULT_SETTINGS)
+    try:
+        stored = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return settings
+    if not isinstance(stored, dict):
+        return settings
+    if stored.get("model_size") in MODEL_CHOICES:
+        settings["model_size"] = stored["model_size"]
+    if stored.get("output_height") in OUTPUT_HEIGHT_CHOICES:
+        settings["output_height"] = stored["output_height"]
+    for key in ("burn_subtitles", "reencode_video", "skip_existing"):
+        if isinstance(stored.get(key), bool):
+            settings[key] = stored[key]
+    return settings
+
+
+def save_settings(settings: dict) -> None:
+    try:
+        SETTINGS_DIRECTORY.mkdir(parents=True, exist_ok=True)
+        SETTINGS_FILE.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def create_root() -> tk.Tk:
+    """Build the Tk root, using the drag-and-drop aware class when available."""
+    if TkinterDnD is not None:
+        try:
+            return TkinterDnD.Tk()
+        except Exception:
+            pass
+    return tk.Tk()
 
 
 @dataclass
@@ -38,14 +96,16 @@ class VideoTranslatorApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Video Speech Translator to English Subtitles")
-        self.root.geometry("820x620")
-        self.root.minsize(760, 560)
+        self.root.geometry("840x700")
+        self.root.minsize(780, 640)
 
+        settings = load_settings()
         self.input_files: list[Path] = []
-        self.model_size = tk.StringVar(value="large-v3")
-        self.burn_subtitles = tk.BooleanVar(value=True)
-        self.reencode_video = tk.BooleanVar(value=True)
-        self.output_height = tk.StringVar(value="720")
+        self.model_size = tk.StringVar(value=str(settings["model_size"]))
+        self.burn_subtitles = tk.BooleanVar(value=bool(settings["burn_subtitles"]))
+        self.reencode_video = tk.BooleanVar(value=bool(settings["reencode_video"]))
+        self.output_height = tk.StringVar(value=str(settings["output_height"]))
+        self.skip_existing = tk.BooleanVar(value=bool(settings["skip_existing"]))
         self.status_text = tk.StringVar(value="Choose up to 10 video files to begin.")
         self.progress_value = tk.DoubleVar(value=0)
         self.message_queue: queue.Queue[tuple[str, object]] = queue.Queue()
@@ -53,8 +113,22 @@ class VideoTranslatorApp:
         self.cancel_event = threading.Event()
         self.process_lock = threading.Lock()
         self.active_process: subprocess.Popen | None = None
+        self.cached_model = None
+        self.cached_model_key: tuple[str, str, str] | None = None
+        self.persist_settings = True
+        self.batch_started: float | None = None
+        self.finished_durations: list[float] = []
 
         self._build_ui()
+        for variable in (
+            self.model_size,
+            self.burn_subtitles,
+            self.reencode_video,
+            self.output_height,
+            self.skip_existing,
+        ):
+            variable.trace_add("write", self._on_settings_changed)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(100, self._process_queue)
 
     def _build_ui(self) -> None:
@@ -89,7 +163,10 @@ class VideoTranslatorApp:
         button_column = ttk.Frame(input_row)
         button_column.pack(side=tk.LEFT, anchor=tk.N)
         ttk.Button(button_column, text="Browse", command=self._choose_inputs).pack(fill=tk.X)
+        ttk.Button(button_column, text="Remove", command=self._remove_selected).pack(fill=tk.X, pady=(4, 0))
         ttk.Button(button_column, text="Clear", command=self._clear_inputs).pack(fill=tk.X, pady=(4, 0))
+        ttk.Button(button_column, text="Move up", command=lambda: self._move_selected(-1)).pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(button_column, text="Move down", command=lambda: self._move_selected(1)).pack(fill=tk.X, pady=(4, 0))
 
         model_row = ttk.Frame(frame)
         model_row.pack(fill=tk.X, pady=6)
@@ -97,7 +174,7 @@ class VideoTranslatorApp:
         model_box = ttk.Combobox(
             model_row,
             textvariable=self.model_size,
-            values=("tiny", "base", "small", "medium", "large-v3"),
+            values=MODEL_CHOICES,
             state="readonly",
             width=18,
         )
@@ -127,6 +204,14 @@ class VideoTranslatorApp:
             width=8,
         ).pack(side=tk.LEFT, padx=(8, 0))
 
+        skip_row = ttk.Frame(frame)
+        skip_row.pack(fill=tk.X, pady=6)
+        ttk.Checkbutton(
+            skip_row,
+            text="Skip videos that already have their output file (never overwrite)",
+            variable=self.skip_existing,
+        ).pack(anchor=tk.W)
+
         actions = ttk.Frame(frame)
         actions.pack(fill=tk.X, pady=(18, 8))
         self.convert_button = ttk.Button(actions, text="Create Subtitle Files", command=self._start_conversion)
@@ -141,6 +226,8 @@ class VideoTranslatorApp:
         status_box.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
         self.status_label = ttk.Label(status_box, textvariable=self.status_text, wraplength=740, justify=tk.LEFT)
         self.status_label.pack(anchor=tk.NW, fill=tk.BOTH, expand=True)
+
+        self._bind_drag_and_drop()
 
     def _choose_inputs(self) -> None:
         selected = filedialog.askopenfilenames(
@@ -197,6 +284,100 @@ class VideoTranslatorApp:
         for index, path in enumerate(self.input_files, start=1):
             self.file_list.insert(tk.END, f"{index}. {path.name}  —  {path.parent}")
 
+    def _remove_selected(self) -> None:
+        selected = sorted(self.file_list.curselection(), reverse=True)
+        if not selected:
+            self.status_text.set("Select a file in the list to remove it.")
+            return
+        for index in selected:
+            if 0 <= index < len(self.input_files):
+                del self.input_files[index]
+        self._refresh_file_list()
+        self.status_text.set(f"{len(self.input_files)} file(s) queued.")
+
+    def _move_selected(self, offset: int) -> None:
+        selected = list(self.file_list.curselection())
+        if len(selected) != 1:
+            self.status_text.set("Select one file in the list to move it.")
+            return
+        index = selected[0]
+        target = index + offset
+        if not 0 <= target < len(self.input_files):
+            return
+        self.input_files[index], self.input_files[target] = self.input_files[target], self.input_files[index]
+        self._refresh_file_list()
+        self.file_list.selection_set(target)
+        self.file_list.activate(target)
+        self.status_text.set(f"{len(self.input_files)} file(s) queued.")
+
+    def _bind_drag_and_drop(self) -> None:
+        if DND_FILES is None:
+            return
+        try:
+            self.file_list.drop_target_register(DND_FILES)
+            self.file_list.dnd_bind("<<Drop>>", self._on_drop)
+            self.root.drop_target_register(DND_FILES)
+            self.root.dnd_bind("<<Drop>>", self._on_drop)
+        except Exception:
+            pass
+
+    def _on_drop(self, event):
+        try:
+            paths = list(self.root.tk.splitlist(event.data))
+        except Exception:
+            cleaned = str(event.data).replace("{", "").replace("}", "")
+            paths = [part for part in cleaned.split() if part]
+        if paths:
+            self._add_files(paths)
+
+    def _settings_payload(self) -> dict:
+        return {
+            "model_size": self.model_size.get(),
+            "burn_subtitles": bool(self.burn_subtitles.get()),
+            "reencode_video": bool(self.reencode_video.get()),
+            "output_height": self.output_height.get(),
+            "skip_existing": bool(self.skip_existing.get()),
+        }
+
+    def _on_settings_changed(self, *_args) -> None:
+        if not self.persist_settings:
+            return
+        save_settings(self._settings_payload())
+
+    def _on_close(self) -> None:
+        save_settings(self._settings_payload())
+        self.root.destroy()
+
+    def _model_is_cached(self, model_size: str) -> bool:
+        return self.cached_model is not None and self.cached_model_key == (model_size, "cpu", "int8")
+
+    def _get_model(self, model_size: str):
+        """Load Whisper once per batch instead of once per file."""
+        if not self._model_is_cached(model_size):
+            self._release_model()
+            self.cached_model = WhisperModel(model_size, device="cpu", compute_type="int8")
+            self.cached_model_key = (model_size, "cpu", "int8")
+        return self.cached_model
+
+    def _release_model(self) -> None:
+        self.cached_model = None
+        self.cached_model_key = None
+
+    def _planned_output_path(self, input_file: Path, burn_subtitles: bool) -> Path:
+        if burn_subtitles:
+            return input_file.with_name(f"{input_file.stem}_eng{input_file.suffix}")
+        return input_file.with_suffix(".srt")
+
+    def _unique_path(self, path: Path) -> Path:
+        """Return a name that does not exist yet, so earlier output is never overwritten."""
+        if not path.exists():
+            return path
+        for counter in range(2, 1000):
+            candidate = path.with_name(f"{path.stem} ({counter}){path.suffix}")
+            if not candidate.exists():
+                return candidate
+        raise RuntimeError(f"Could not find a free file name for {path.name}.")
+
     def _start_conversion(self) -> None:
         if self.worker_thread is not None and self.worker_thread.is_alive():
             messagebox.showinfo("Still running", "A conversion is still finishing. Please wait a moment.", parent=self.root)
@@ -224,7 +405,13 @@ class VideoTranslatorApp:
         reencode_height = int(self.output_height.get()) if self.reencode_video.get() else None
         self.worker_thread = threading.Thread(
             target=self._process_batch,
-            args=(files, self.model_size.get(), self.burn_subtitles.get(), reencode_height),
+            args=(
+                files,
+                self.model_size.get(),
+                self.burn_subtitles.get(),
+                reencode_height,
+                self.skip_existing.get(),
+            ),
             daemon=True,
         )
         self.worker_thread.start()
@@ -253,16 +440,31 @@ class VideoTranslatorApp:
         model_size: str,
         burn_subtitles: bool,
         reencode_height: int | None,
+        skip_existing: bool = True,
     ) -> None:
         results: list[tuple[Path, Path]] = []
         failures: list[tuple[Path, str]] = []
+        skipped: list[tuple[Path, Path]] = []
         cancelled = False
+        self.batch_started = time.monotonic()
+        self.finished_durations = []
         try:
             total = len(files)
             for index, input_file in enumerate(files):
                 if self.cancel_event.is_set():
                     cancelled = True
                     break
+                planned_output = self._planned_output_path(input_file, burn_subtitles)
+                if skip_existing and planned_output.exists():
+                    skipped.append((input_file, planned_output))
+                    self._post_progress(
+                        f"[{index + 1}/{total}] {input_file.name}\nSkipped: {planned_output.name} already exists.",
+                        (index + 1) / total * 100.0,
+                        index,
+                        total,
+                    )
+                    continue
+                file_started = time.monotonic()
                 try:
                     output_file = self._convert_file(
                         input_file,
@@ -278,9 +480,14 @@ class VideoTranslatorApp:
                     break
                 except Exception as exc:
                     failures.append((input_file, str(exc)))
-            self.message_queue.put(("batch_done", (results, failures, cancelled)))
+                finally:
+                    self.finished_durations.append(time.monotonic() - file_started)
+            self.message_queue.put(("batch_done", (results, failures, cancelled, skipped)))
         except Exception as exc:
             self.message_queue.put(("error", str(exc)))
+        finally:
+            self._release_model()
+            self.batch_started = None
 
     def _convert_file(
         self,
@@ -311,8 +518,9 @@ class VideoTranslatorApp:
                 str(source_audio),
             ])
 
-            self._post_progress(f"{label}\nLoading Whisper model '{model_size}'...", 15, index, total)
-            model = WhisperModel(model_size, device="cpu", compute_type="int8")
+            if not self._model_is_cached(model_size):
+                self._post_progress(f"{label}\nLoading Whisper model '{model_size}'...", 15, index, total)
+            model = self._get_model(model_size)
             self._raise_if_cancelled()
 
             self._post_progress(
@@ -349,14 +557,11 @@ class VideoTranslatorApp:
 
             self._raise_if_cancelled()
 
-            self._post_progress(f"{label}\nSaving English subtitles...", 75, index, total)
-            srt_file = input_file.with_suffix(".srt")
             srt_content = self._segments_to_srt(segments)
-            srt_file.write_text(srt_content, encoding="utf-8")
-
-            output_file = srt_file
             if burn_subtitles:
-                embedded_video = input_file.with_name(f"{input_file.stem}_eng{input_file.suffix}")
+                embedded_video = self._unique_path(
+                    input_file.with_name(f"{input_file.stem}_eng{input_file.suffix}")
+                )
                 description = f" at {reencode_height}p" if reencode_height else ""
                 self._post_progress(
                     f"{label}\nBurning subtitles into new video{description}. This may take a while...",
@@ -367,12 +572,24 @@ class VideoTranslatorApp:
                 temp_embed_srt = temp_dir / "english.srt"
                 temp_embed_srt.write_text(srt_content, encoding="utf-8")
                 try:
-                    self._embed_subtitles(input_file, temp_embed_srt, embedded_video, reencode_height)
+                    self._embed_subtitles(
+                        input_file,
+                        temp_embed_srt,
+                        embedded_video,
+                        reencode_height,
+                        duration=duration,
+                        label=label,
+                        index=index,
+                        total=total,
+                    )
                 except ConversionCancelled:
                     embedded_video.unlink(missing_ok=True)
                     raise
-                srt_file.unlink(missing_ok=True)
                 output_file = embedded_video
+            else:
+                self._post_progress(f"{label}\nSaving English subtitles...", 75, index, total)
+                output_file = self._unique_path(input_file.with_suffix(".srt"))
+                output_file.write_text(srt_content, encoding="utf-8")
 
             self._post_progress(f"{label}\nFinished.", 100, index, total)
             return output_file
@@ -400,34 +617,47 @@ class VideoTranslatorApp:
         srt_file: Path,
         output_file: Path,
         reencode_height: int | None = None,
+        duration: float = 0.0,
+        label: str = "",
+        index: int = 0,
+        total: int = 1,
     ) -> None:
         subtitle_filter = f"subtitles={self._format_ffmpeg_filter_path(srt_file)}"
         video_filter = subtitle_filter
         if reencode_height:
             video_filter = f"scale=-2:{reencode_height},{subtitle_filter}"
-        self._run_ffmpeg([
-            self._get_ffmpeg_path(),
-            "-y",
-            "-i",
-            str(input_file),
-            "-vf",
-            video_filter,
-            "-c:v",
-            "libx264",
-            "-crf",
-            "23",
-            "-preset",
-            "veryfast",
-            "-c:a",
-            "copy",
-            str(output_file),
-        ])
+        self._run_ffmpeg_with_progress(
+            [
+                self._get_ffmpeg_path(),
+                "-y",
+                "-i",
+                str(input_file),
+                "-vf",
+                video_filter,
+                "-c:v",
+                "libx264",
+                "-crf",
+                "23",
+                "-preset",
+                "veryfast",
+                "-c:a",
+                "copy",
+                "-progress",
+                "pipe:1",
+                "-nostats",
+                str(output_file),
+            ],
+            duration,
+            label,
+            index,
+            total,
+        )
 
     def _format_ffmpeg_filter_path(self, path: Path) -> str:
         formatted = path.resolve().as_posix().replace(":", "\\:").replace("'", "\\'")
         return f"'{formatted}'"
 
-    def _run_ffmpeg(self, command: list[str]) -> None:
+    def _windows_process_flags(self):
         startupinfo = None
         creationflags = 0
         if os.name == "nt":
@@ -435,6 +665,10 @@ class VideoTranslatorApp:
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startupinfo.wShowWindow = 6
             creationflags = subprocess.CREATE_NO_WINDOW
+        return startupinfo, creationflags
+
+    def _spawn_ffmpeg(self, command: list[str]) -> subprocess.Popen:
+        startupinfo, creationflags = self._windows_process_flags()
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -450,12 +684,11 @@ class VideoTranslatorApp:
             already_cancelled = self.cancel_event.is_set()
         if already_cancelled and process.poll() is None:
             process.terminate()
-        try:
-            stdout, stderr = process.communicate()
-        finally:
-            with self.process_lock:
-                self.active_process = None
+        return process
 
+    def _finish_ffmpeg(self, process: subprocess.Popen, command: list[str], stdout: str, stderr: str) -> None:
+        with self.process_lock:
+            self.active_process = None
         if self.cancel_event.is_set():
             raise ConversionCancelled()
         if process.returncode != 0:
@@ -463,19 +696,107 @@ class VideoTranslatorApp:
             error_text = (stderr or stdout or "").strip() or "FFmpeg failed."
             raise RuntimeError(f"FFmpeg failed while opening or writing a file.\n\nCommand:\n{command_text}\n\nDetails:\n{error_text}")
 
+    def _run_ffmpeg(self, command: list[str]) -> None:
+        process = self._spawn_ffmpeg(command)
+        try:
+            stdout, stderr = process.communicate()
+        finally:
+            with self.process_lock:
+                self.active_process = None
+        self._finish_ffmpeg(process, command, stdout, stderr)
+
+    def _run_ffmpeg_with_progress(
+        self,
+        command: list[str],
+        duration: float,
+        label: str,
+        index: int,
+        total: int,
+        start_percent: float = 80.0,
+        end_percent: float = 99.0,
+    ) -> None:
+        """Run FFmpeg and report the encode position from its `-progress` stream."""
+        process = self._spawn_ffmpeg(command)
+        stderr_chunks: list[str] = []
+
+        def drain_stderr() -> None:
+            if process.stderr is None:
+                return
+            for line in process.stderr:
+                stderr_chunks.append(line)
+                if len(stderr_chunks) > 4000:
+                    del stderr_chunks[:2000]
+
+        reader = threading.Thread(target=drain_stderr, daemon=True)
+        reader.start()
+        speed_text = ""
+        last_post = 0.0
+        try:
+            if process.stdout is not None:
+                for line in process.stdout:
+                    if self.cancel_event.is_set():
+                        if process.poll() is None:
+                            process.terminate()
+                        break
+                    key, _, value = line.strip().partition("=")
+                    if key == "speed":
+                        speed_text = value.strip()
+                    elif key == "out_time_us" and duration > 0:
+                        try:
+                            seconds = int(value) / 1_000_000
+                        except ValueError:
+                            continue
+                        fraction = max(min(seconds / duration, 1.0), 0.0)
+                        now = time.monotonic()
+                        if now - last_post < 0.4:
+                            continue
+                        last_post = now
+                        detail = f"{fraction * 100:.0f}% of the video"
+                        if speed_text:
+                            detail += f" at {speed_text}"
+                        self._post_progress(
+                            f"{label}\nBurning subtitles into new video: {detail}.",
+                            start_percent + fraction * (end_percent - start_percent),
+                            index,
+                            total,
+                        )
+            process.wait()
+        finally:
+            reader.join(timeout=2)
+        self._finish_ffmpeg(process, command, "", "".join(stderr_chunks))
+
     def _get_ffmpeg_path(self) -> str | None:
-        system_ffmpeg = shutil.which("ffmpeg")
-        if system_ffmpeg:
-            return system_ffmpeg
+        """Use the FFmpeg shipped with the app first, so every build behaves the same."""
         try:
             return imageio_ffmpeg.get_ffmpeg_exe()
         except Exception:
-            return None
+            pass
+        return shutil.which("ffmpeg")
 
     def _post_progress(self, text: str, local_progress: float, index: int, total: int) -> None:
         clamped = max(min(float(local_progress), 100.0), 0.0)
         overall = (index + clamped / 100.0) / total * 100.0
-        self.message_queue.put(("status", (text, overall)))
+        self.message_queue.put(("status", (f"{text}{self._eta_text(index, total, clamped)}", overall)))
+
+    def _eta_text(self, index: int, total: int, local_progress: float) -> str:
+        if self.batch_started is None or not self.finished_durations:
+            return ""
+        average = sum(self.finished_durations) / len(self.finished_durations)
+        remaining_files = max(total - index - 1, 0) + (1.0 - local_progress / 100.0)
+        seconds = average * remaining_files
+        if seconds < 20:
+            return ""
+        return f"\nAbout {self._format_duration(seconds)} remaining."
+
+    def _format_duration(self, seconds: float) -> str:
+        total_seconds = int(round(seconds))
+        if total_seconds < 60:
+            return f"{max(total_seconds, 1)} s"
+        minutes, _seconds = divmod(total_seconds, 60)
+        if minutes < 60:
+            return f"{minutes} min"
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours} h {minutes:02d} min"
 
     def _process_queue(self) -> None:
         try:
@@ -486,12 +807,12 @@ class VideoTranslatorApp:
                     self.status_text.set(str(text))
                     self.progress_value.set(float(progress))
                 elif event == "batch_done":
-                    results, failures, cancelled = payload
+                    results, failures, cancelled, skipped = payload
                     if not cancelled:
                         self.progress_value.set(100)
                     self.convert_button.configure(state=tk.NORMAL)
                     self.cancel_button.configure(state=tk.DISABLED)
-                    summary = self._format_batch_summary(results, failures, cancelled)
+                    summary = self._format_batch_summary(results, failures, cancelled, skipped)
                     self.status_text.set(summary)
                     if cancelled:
                         messagebox.showinfo("Batch cancelled", summary, parent=self.root)
@@ -516,7 +837,9 @@ class VideoTranslatorApp:
         results: list[tuple[Path, Path]],
         failures: list[tuple[Path, str]],
         cancelled: bool = False,
+        skipped: list[tuple[Path, Path]] | None = None,
     ) -> str:
+        skipped = skipped or []
         lines = []
         if cancelled:
             lines.append("Batch cancelled. Remaining files were not processed.")
@@ -525,6 +848,11 @@ class VideoTranslatorApp:
                 lines.append("")
             lines.append(f"Finished {len(results)} file(s):")
             lines.extend(f"  {output_file}" for _input, output_file in results)
+        if skipped:
+            if lines:
+                lines.append("")
+            lines.append(f"Skipped {len(skipped)} file(s) that already had an output:")
+            lines.extend(f"  {output_file}" for _input, output_file in skipped)
         if failures:
             if lines:
                 lines.append("")
@@ -681,9 +1009,10 @@ def _run_selftest(args: list[str]) -> int:
         f"mode={mode}",
         f"model={model_size}",
     ]
-    root = tk.Tk()
+    root = create_root()
     root.withdraw()
     app = VideoTranslatorApp(root)
+    app.persist_settings = False  # a self-test must not rewrite the user's preferences
     app.model_size.set(model_size)
     exit_code = 1
     try:
@@ -694,7 +1023,7 @@ def _run_selftest(args: list[str]) -> int:
         burn = mode == "burn"
         height = int(app.output_height.get()) if burn and app.reencode_video.get() else None
         lines.append(f"burn={burn} height={height}")
-        app._process_batch([video], model_size, burn, height)
+        app._process_batch([video], model_size, burn, height, skip_existing=False)
         results: list[tuple[Path, Path]] = []
         failures: list[tuple[Path, str]] = []
         while True:
@@ -706,7 +1035,7 @@ def _run_selftest(args: list[str]) -> int:
                 status_text, progress = payload
                 lines.append(f"status {float(progress):5.1f}% {str(status_text).splitlines()[-1]}")
             elif event == "batch_done":
-                results, failures, _cancelled = payload
+                results, failures, _cancelled, _skipped = payload
             elif event == "error":
                 failures = [(video, str(payload))]
         for _input_file, output_file in results:
@@ -730,6 +1059,6 @@ if __name__ == "__main__":
     if "--selftest" in sys.argv:
         selftest_args = sys.argv[sys.argv.index("--selftest") + 1:]
         raise SystemExit(_run_selftest(selftest_args))
-    root_window = tk.Tk()
+    root_window = create_root()
     app = VideoTranslatorApp(root_window)
     root_window.mainloop()
