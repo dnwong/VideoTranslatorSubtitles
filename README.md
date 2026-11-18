@@ -1,6 +1,8 @@
-# MP4 Speech Translator to English Subtitles
+# Video Speech Translator to English Subtitles
 
-A Windows desktop tool that opens an MP4 video and translates the spoken audio to an English `.srt` subtitle file with the same name. It can optionally burn visible subtitles into a new MP4 ending with `_eng.mp4`.
+A Windows desktop tool that opens up to 10 videos at once and translates the spoken audio to English `.srt` subtitle files with the same names. It can optionally burn visible subtitles into new videos ending with `_eng`.
+
+Supported input formats: `.mp4`, `.m4v`, `.mov`, `.mkv`, `.webm`, `.avi`, `.wmv`.
 
 ## Requirements
 
@@ -70,13 +72,15 @@ dist\VideoTranslatorSubtitles\VideoTranslatorSubtitles.exe
 
 ## How to use
 
-1. Click **Browse** and choose an `.mp4` video.
+1. Click **Browse** and choose up to 10 video files (`.mp4`, `.m4v`, `.mov`, `.mkv`, `.webm`, `.avi`, `.wmv`). Repeat **Browse** to add more; **Clear** empties the list.
 2. Select a Whisper model.
-3. Optional: check **Burn subtitles visibly into a new video ending with "_eng.mp4"**.
-4. Optional: check **Re-encode output video to 720p**.
-5. Click **Create Subtitle File**.
+3. **Burn subtitles visibly into a new video ending with "_eng"** is checked by default.
+4. **Re-encode burned video to the selected height** is checked by default; choose `1080`, `720` or `480` from the list right beside it.
+5. Click **Create Subtitle Files**. While a batch runs, **Cancel** stops the queue and terminates any FFmpeg process still encoding; files that already finished are kept.
 
-If burning is not enabled, the app creates an `.srt` subtitle file with the English translation and the same base name as the original video. If burning is enabled, it creates a new MP4 ending with `_eng.mp4` where the subtitles are visible on the video, then deletes the separate `.srt` file. If 720p re-encoding is enabled, the burned output video is scaled to 720p. After successful processing, the app asks whether to delete the original MP4 and requires a second confirmation before deletion.
+Each queued video is processed in order. When burning is not enabled, the app creates an `.srt` subtitle file with the English translation and the same base name as the original video. When burning is enabled, it creates a new video ending with `_eng` where the subtitles are visible, then deletes the separate `.srt` file. If re-encoding is enabled, the burned output video is scaled to the selected height. Progress is shown for the whole batch, and a file that fails is reported without stopping the remaining files.
+
+When the batch finishes, the app lists the completed files and asks whether to delete their original videos, requiring a second confirmation before anything is deleted.
 
 ## Notes
 
