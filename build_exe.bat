@@ -7,7 +7,7 @@ if errorlevel 1 goto failed
 
 echo.
 echo Build complete.
-echo EXE location: dist\VideoTranslatorSubtitles\VideoTranslatorSubtitles.exe
+echo EXE location: dist_*\VideoTranslatorSubtitles\VideoTranslatorSubtitles.exe
 pause
 exit /b 0
 

@@ -42,16 +42,16 @@ python app.py
 
 ## Run the Windows executable
 
-After building, run:
+Each build goes into a new timestamped folder, so use the folder your build printed. For example:
 
 ```text
-dist\VideoTranslatorSubtitles\VideoTranslatorSubtitles.exe
+dist_<timestamp>\VideoTranslatorSubtitles\VideoTranslatorSubtitles.exe
 ```
 
 To move the app to another Windows computer, copy the whole folder:
 
 ```text
-dist\VideoTranslatorSubtitles\
+dist_<timestamp>\VideoTranslatorSubtitles\
 ```
 
 The executable build includes FFmpeg through `imageio-ffmpeg`, so the other computer should not need a separate FFmpeg install.
@@ -64,11 +64,13 @@ Run:
 .\build_exe.bat
 ```
 
-The executable will be created at:
+This calls `auto_build.ps1`, which installs the requirements, compiles `app.py` and builds with PyInstaller. Every build goes into a new folder named with the build time (`yyyyMMdd_HHmmss`), so an earlier build is never overwritten:
 
 ```text
-dist\VideoTranslatorSubtitles\VideoTranslatorSubtitles.exe
+dist_<timestamp>\VideoTranslatorSubtitles\VideoTranslatorSubtitles.exe
 ```
+
+The executable needs the rest of that folder beside it, so copy the folder rather than the `.exe` alone. To hand over a single file instead, see the portable build below.
 
 ## Portable single-file build
 
@@ -78,7 +80,7 @@ Run:
 .\build_portable.bat
 ```
 
-The result is one self-contained file:
+This calls `auto_build_portable.ps1` (PyInstaller `--onefile`). Like the folder build it writes a new timestamped folder each time, and the single executable sits directly inside it:
 
 ```text
 dist_portable_<timestamp>\VideoTranslatorSubtitles.exe
