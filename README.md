@@ -70,6 +70,24 @@ The executable will be created at:
 dist\VideoTranslatorSubtitles\VideoTranslatorSubtitles.exe
 ```
 
+## Portable single-file build
+
+Run:
+
+```powershell
+.\build_portable.bat
+```
+
+The result is one self-contained file:
+
+```text
+dist_portable_<timestamp>\VideoTranslatorSubtitles.exe
+```
+
+Copy that single file to any Windows computer and run it. No folder, no Python install and no separate FFmpeg are needed; FFmpeg and the Whisper libraries are packed inside the executable.
+
+The first launch unpacks the app to the `%TEMP%` folder (about 325 MB), so startup is slower than the folder build. Downloaded Whisper models are still cached in `%LOCALAPPDATA%\VideoTranslatorSubtitles\huggingface`, so that computer needs internet once per model.
+
 ## Self-test the packaged build
 
 The executable has an opt-in `--selftest` flag that processes one video without opening the GUI, so a frozen build can be verified end to end:
