@@ -70,6 +70,21 @@ The executable will be created at:
 dist\VideoTranslatorSubtitles\VideoTranslatorSubtitles.exe
 ```
 
+## Self-test the packaged build
+
+The executable has an opt-in `--selftest` flag that processes one video without opening the GUI, so a frozen build can be verified end to end:
+
+```text
+VideoTranslatorSubtitles.exe --selftest <video> <log file> [srt|burn]
+```
+
+- `srt` writes only the `.srt` subtitle file; `burn` also writes the `_eng` video, scaled to the height selected in the app when re-encoding is enabled.
+- The log file records the resolved FFmpeg path, progress, the output path and size, and any failure.
+- The exit code is `0` when the batch produced output and `1` otherwise.
+- Set `VTS_SELFTEST_MODEL` to override the default `tiny` model.
+
+Without the flag the app starts normally.
+
 ## How to use
 
 1. Click **Browse** and choose up to 10 video files (`.mp4`, `.m4v`, `.mov`, `.mkv`, `.webm`, `.avi`, `.wmv`). Repeat **Browse** to add more; **Clear** empties the list.

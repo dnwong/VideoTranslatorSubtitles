@@ -2,6 +2,7 @@ import os
 import queue
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import tkinter as tk
@@ -663,7 +664,72 @@ class VideoTranslatorApp:
         return result.get()
 
 
+def _run_selftest(args: list[str]) -> int:
+    """Headless end-to-end check used to verify a packaged build.
+
+    Usage: VideoTranslatorSubtitles.exe --selftest <video> <log file> [srt|burn]
+    """
+    if len(args) < 2:
+        return 2
+    video = Path(args[0])
+    log_file = Path(args[1])
+    mode = args[2].lower() if len(args) > 2 else "burn"
+    model_size = os.environ.get("VTS_SELFTEST_MODEL", "tiny")
+    lines = [
+        f"frozen={getattr(sys, 'frozen', False)}",
+        f"video={video}",
+        f"mode={mode}",
+        f"model={model_size}",
+    ]
+    root = tk.Tk()
+    root.withdraw()
+    app = VideoTranslatorApp(root)
+    app.model_size.set(model_size)
+    exit_code = 1
+    try:
+        ffmpeg_path = app._get_ffmpeg_path()
+        lines.append(f"ffmpeg={ffmpeg_path}")
+        if ffmpeg_path is None:
+            raise RuntimeError("FFmpeg not found inside the packaged app.")
+        burn = mode == "burn"
+        height = int(app.output_height.get()) if burn and app.reencode_video.get() else None
+        lines.append(f"burn={burn} height={height}")
+        app._process_batch([video], model_size, burn, height)
+        results: list[tuple[Path, Path]] = []
+        failures: list[tuple[Path, str]] = []
+        while True:
+            try:
+                event, payload = app.message_queue.get_nowait()
+            except queue.Empty:
+                break
+            if event == "status":
+                status_text, progress = payload
+                lines.append(f"status {float(progress):5.1f}% {str(status_text).splitlines()[-1]}")
+            elif event == "batch_done":
+                results, failures, _cancelled = payload
+            elif event == "error":
+                failures = [(video, str(payload))]
+        for _input_file, output_file in results:
+            if output_file.exists():
+                lines.append(f"output={output_file} bytes={output_file.stat().st_size}")
+            else:
+                lines.append(f"output MISSING {output_file}")
+        lines.extend(f"failure={error.strip()}" for _input_file, error in failures)
+        exit_code = 0 if results and not failures else 1
+    except Exception as exc:
+        lines.append(f"exception={type(exc).__name__}: {exc}")
+    finally:
+        log_file.write_text(chr(10).join(lines) + chr(10), encoding="utf-8")
+        try:
+            root.destroy()
+        except Exception:
+            pass
+    return exit_code
+
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        selftest_args = sys.argv[sys.argv.index("--selftest") + 1:]
+        raise SystemExit(_run_selftest(selftest_args))
     root_window = tk.Tk()
     app = VideoTranslatorApp(root_window)
     root_window.mainloop()
