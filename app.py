@@ -956,15 +956,21 @@ class VideoTranslatorApp:
         if warning_text and message.endswith(warning_text):
             display_message = message[: -len(warning_text)].rstrip()
 
-        message_label = ttk.Label(frame, text=display_message, justify=tk.LEFT, font=("Lucida Console", 10))
-        message_label.pack(fill=tk.BOTH, expand=True)
+        screen_width = dialog.winfo_screenwidth()
+        screen_height = dialog.winfo_screenheight()
+        widest_line = max((len(line) for line in display_message.splitlines()), default=80)
+        char_px = 9
+        line_px = 17
+        width = min(max(520, 70 + widest_line * char_px), max(520, screen_width - 80))
+
+        # The button row is packed first (and from the bottom) so a long list can
+        # never push Yes/No off the window, and the dialog is clamped to the screen.
+        button_row = ttk.Frame(frame)
+        button_row.pack(side=tk.BOTTOM, fill=tk.X, pady=(18, 0))
 
         if warning_text:
             warning_label = tk.Label(frame, text=warning_text, justify=tk.LEFT, font=("Segoe UI", 16, "bold"), fg="red")
-            warning_label.pack(anchor=tk.W, pady=(10, 0))
-
-        button_row = ttk.Frame(frame)
-        button_row.pack(fill=tk.X, pady=(18, 0))
+            warning_label.pack(side=tk.BOTTOM, anchor=tk.W, pady=(10, 0))
 
         def choose(value: bool) -> None:
             if value and confirm_message:
@@ -978,14 +984,45 @@ class VideoTranslatorApp:
         ttk.Button(button_row, text="No", command=lambda: choose(False), width=12).pack(side=tk.RIGHT)
 
         dialog.protocol("WM_DELETE_WINDOW", lambda: choose(False))
+
+        text_area = ttk.Frame(frame)
+        text_area.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        all_lines = display_message.splitlines() or [""]
+        max_text_px = max(120, screen_height - 320)
+        max_lines = max(6, max_text_px // line_px)
+        visible_lines = min(len(all_lines), max_lines)
+        scrolls = len(all_lines) > visible_lines
+
+        scrollbar = ttk.Scrollbar(text_area, orient=tk.VERTICAL)
+        if scrolls:
+            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        message_text = tk.Text(
+            text_area,
+            wrap=tk.NONE,
+            font=("Lucida Console", 10),
+            width=max(40, width // char_px - 3),
+            height=visible_lines,
+            relief=tk.FLAT,
+            borderwidth=0,
+            highlightthickness=0,
+            cursor="arrow",
+            background=dialog.cget("background"),
+        )
+        message_text.insert("1.0", display_message)
+        message_text.configure(state=tk.DISABLED)
+        if scrolls:
+            message_text.configure(yscrollcommand=scrollbar.set)
+            scrollbar.configure(command=message_text.yview)
+        message_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
         dialog.update_idletasks()
-        widest_line = max((len(line) for line in message.splitlines()), default=80)
-        screen_width = dialog.winfo_screenwidth()
-        width = min(max(520, 70 + widest_line * 9), max(520, screen_width - 80))
-        message_label.configure(wraplength=max(width - 60, 460))
-        height = max(220, dialog.winfo_reqheight())
+        height = min(max(220, dialog.winfo_reqheight()), screen_height - 120)
         x = self.root.winfo_rootx() + max((self.root.winfo_width() - width) // 2, 0)
         y = self.root.winfo_rooty() + max((self.root.winfo_height() - height) // 2, 0)
+        x = min(max(x, 10), max(10, screen_width - width - 20))
+        y = min(max(y, 10), max(10, screen_height - height - 80))
         dialog.geometry(f"{width}x{height}+{x}+{y}")
         dialog.focus_force()
         self.root.wait_window(dialog)
